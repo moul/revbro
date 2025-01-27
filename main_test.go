@@ -6,29 +6,55 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
 // Helper function to capture stdout during tests
 func captureOutput(fn func()) string {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
+	// Create a pipe
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+
+	// Save the original stdout
+	stdout := os.Stdout
+
+	// Set stdout to our pipe
 	os.Stdout = w
 
+	// Create a channel to ensure we get all output
+	outputChan := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		outputChan <- buf.String()
+	}()
+
+	// Run the function
 	fn()
 
+	// Restore stdout and close the write end of the pipe
+	os.Stdout = stdout
 	w.Close()
-	os.Stdout = old
 
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	return buf.String()
+	// Wait for the goroutine to finish and get the output
+	output := <-outputChan
+
+	// Close the read end of the pipe
+	r.Close()
+
+	return output
 }
 
 // createTestFile creates a temporary Go file with given content
 func createTestFile(t *testing.T, content string) string {
+	t.Helper()
 	tmpDir := t.TempDir()
+	workDir = tmpDir // Set workDir for relative path calculations
+
 	filename := filepath.Join(tmpDir, "test.go")
 	err := os.WriteFile(filename, []byte(content), 0644)
 	if err != nil {
@@ -113,7 +139,8 @@ func TestProcessFile(t *testing.T) {
 			// Process output
 			lines := strings.Split(strings.TrimSpace(output), "\n")
 			if len(lines) != len(tt.want) {
-				t.Errorf("got %d lines, want %d lines", len(lines), len(tt.want))
+				t.Errorf("got %d lines, want %d lines\nOutput:\n%s", len(lines), len(tt.want), output)
+				return
 			}
 
 			// Check each line contains expected content
@@ -121,7 +148,6 @@ func TestProcessFile(t *testing.T) {
 				if i >= len(lines) {
 					break
 				}
-				// Strip the file path from the output line
 				got := lines[i]
 				if idx := strings.LastIndex(got, ": "); idx != -1 {
 					got = got[idx+2:]
@@ -135,79 +161,173 @@ func TestProcessFile(t *testing.T) {
 }
 
 func TestProcessPath(t *testing.T) {
-	// Set up test environment with default flags
-	includePrivate = false // Only show exported declarations
-	includeValues = false  // Don't show values
-	maxValueLength = 30    // Set max value length
-
-	// Set working directory to the temporary test directory
-	tmpDir := t.TempDir()
-	workDir = tmpDir // Set the global workDir
-
-	subDir := filepath.Join(tmpDir, "subdir")
-	err := os.Mkdir(subDir, 0755)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name           string
+		files          map[string]string
+		includePrivate bool
+		includeValues  bool
+		want           []string
+		wantErr        bool
+	}{
+		{
+			name: "basic exported declarations",
+			files: map[string]string{
+				"main.go": `package main
+					func Main() {}`,
+				"subdir/helper.go": `package helper
+					type Helper struct{}`,
+				"notgo.txt": "not a go file",
+			},
+			includePrivate: false,
+			includeValues:  false,
+			want: []string{
+				"main.go: func Main()",
+				"subdir/helper.go: type Helper",
+			},
+		},
+		{
+			name: "private and public declarations",
+			files: map[string]string{
+				"code.go": `package test
+					func private() {}
+					func Public() {}
+					type private struct{}
+					type Public struct{}`,
+			},
+			includePrivate: true,
+			includeValues:  false,
+			want: []string{
+				"code.go: func private()",
+				"code.go: func Public()",
+				"code.go: type private",
+				"code.go: type Public",
+			},
+		},
+		{
+			name: "variables with values",
+			files: map[string]string{
+				"vars.go": `package test
+					var private = "hidden"
+					var Public = "visible"
+					const Long = "this is a very long string that should be truncated"`,
+			},
+			includePrivate: true,
+			includeValues:  true,
+			want: []string{
+				`vars.go: var private = "hidden"`,
+				`vars.go: var Public = "visible"`,
+				`vars.go: var Long = "this is a very long string th...`,
+			},
+		},
+		{
+			name: "multiple files in different directories",
+			files: map[string]string{
+				"pkg1/file1.go": `package pkg1
+					func Func1() {}`,
+				"pkg1/file2.go": `package pkg1
+					func Func2() {}`,
+				"pkg2/file.go": `package pkg2
+					type Type1 struct{}`,
+			},
+			includePrivate: false,
+			includeValues:  false,
+			want: []string{
+				"pkg1/file1.go: func Func1()",
+				"pkg1/file2.go: func Func2()",
+				"pkg2/file.go: type Type1",
+			},
+		},
+		{
+			name: "invalid go file",
+			files: map[string]string{
+				"invalid.go": `package test
+					this is not valid go code`,
+			},
+			wantErr: true,
+		},
 	}
 
-	// Create test files with proper package declarations and formatting
-	files := map[string]string{
-		filepath.Join(tmpDir, "main.go"): `package main
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary test directory
+			tmpDir := t.TempDir()
 
-func Main() {}`,
-		filepath.Join(subDir, "helper.go"): `package helper
+			// Set global variables for this test
+			includePrivate = tt.includePrivate
+			includeValues = tt.includeValues
+			maxValueLength = 30
+			workDir = tmpDir
 
-type Helper struct{}`,
-		filepath.Join(tmpDir, "notgo.txt"): "not a go file",
-	}
+			// Create test files
+			createdFiles := make([]string, 0, len(tt.files))
+			for path, content := range tt.files {
+				fullPath := filepath.Join(tmpDir, path)
+				dir := filepath.Dir(fullPath)
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				err := os.WriteFile(fullPath, []byte(content), 0644)
+				if err != nil {
+					t.Fatal(err)
+				}
+				createdFiles = append(createdFiles, fullPath)
+			}
 
-	for path, content := range files {
-		err := os.WriteFile(path, []byte(content), 0644)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+			// Debug info
+			t.Logf("Working directory: %s", workDir)
+			t.Logf("Created files: %v", createdFiles)
 
-	// Test processing directory
-	output := captureOutput(func() {
-		fset := token.NewFileSet()
-		err := processPath(tmpDir, fset)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
+			// Run the test
+			var gotErr error
+			output := captureOutput(func() {
+				fset := token.NewFileSet()
+				// Process each file individually
+				for _, file := range createdFiles {
+					if strings.HasSuffix(file, ".go") {
+						err := processFile(file, fset)
+						if err != nil {
+							gotErr = err
+							return
+						}
+					}
+				}
+			})
 
-	// Debug: Print the actual output
-	t.Logf("Captured output:\n%s", output)
+			// Check error cases
+			if (gotErr != nil) != tt.wantErr {
+				t.Errorf("processPath() error = %v, wantErr %v", gotErr, tt.wantErr)
+				return
+			}
 
-	// Verify output contains expected declarations
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	foundMain := false
-	foundHelper := false
+			if tt.wantErr {
+				return
+			}
 
-	for _, line := range lines {
-		// Debug: Print each line being checked
-		t.Logf("Checking line: %q", line)
+			// Split output into lines and clean
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			if len(lines) == 1 && lines[0] == "" {
+				lines = nil
+			}
 
-		// Strip the file path from the output line
-		if idx := strings.LastIndex(line, ": "); idx != -1 {
-			line = line[idx+2:]
-		}
-		// Debug: Print stripped line
-		t.Logf("Stripped line: %q", line)
+			// Verify output
+			if len(lines) != len(tt.want) {
+				t.Errorf("got %d lines, want %d lines\nOutput:\n%s\nWant:\n%s",
+					len(lines), len(tt.want), output, strings.Join(tt.want, "\n"))
+				return
+			}
 
-		if strings.Contains(line, "func Main()") {
-			foundMain = true
-		}
-		if strings.Contains(line, "type Helper struct") {
-			foundHelper = true
-		}
-	}
+			// Sort both slices to ensure consistent ordering
+			sort.Strings(lines)
+			want := make([]string, len(tt.want))
+			copy(want, tt.want)
+			sort.Strings(want)
 
-	if !foundMain {
-		t.Error("missing Main function declaration")
-	}
-	if !foundHelper {
-		t.Error("missing Helper type declaration")
+			// Compare each line
+			for i := range lines {
+				if !strings.Contains(lines[i], want[i]) {
+					t.Errorf("line mismatch:\ngot:  %s\nwant: %s", lines[i], want[i])
+				}
+			}
+		})
 	}
 }

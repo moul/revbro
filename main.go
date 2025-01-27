@@ -21,12 +21,17 @@ var (
 )
 
 func main() {
-	// Get working directory for relative path calculations
-	var err error             // declare err separately
-	workDir, err = os.Getwd() // use existing global workDir
-	if err != nil {
-		fmt.Printf("Error getting working directory: %v\n", err)
+	if err := run(); err != nil {
+		fmt.Println(err)
 		os.Exit(1)
+	}
+}
+
+func run() error {
+	var err error
+	workDir, err = os.Getwd()
+	if err != nil {
+		return fmt.Errorf("error getting working directory: %v", err)
 	}
 
 	// Command-line arguments
@@ -42,7 +47,7 @@ func main() {
 		fmt.Println("Usage: go run main.go [flags] <path1> <path2> ...")
 		fmt.Println("\nPaths can be files, directories, or ./... for recursive scanning")
 		flag.PrintDefaults()
-		os.Exit(1)
+		return fmt.Errorf("no paths provided")
 	}
 
 	// Process each path
@@ -56,25 +61,22 @@ func main() {
 			}
 			absPath, err := filepath.Abs(basePath)
 			if err != nil {
-				fmt.Printf("Invalid path %s: %v\n", path, err)
-				continue
+				return fmt.Errorf("invalid path %s: %v", path, err)
 			}
-			err = processPath(absPath, fset)
-			if err != nil {
-				fmt.Println(err)
+			if err := processPath(absPath, fset); err != nil {
+				return err
 			}
 		} else {
 			absPath, err := filepath.Abs(path)
 			if err != nil {
-				fmt.Printf("Invalid path %s: %v\n", path, err)
-				continue
+				return fmt.Errorf("invalid path %s: %v", path, err)
 			}
-			err = processPath(absPath, fset)
-			if err != nil {
-				fmt.Println(err)
+			if err := processPath(absPath, fset); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
 }
 
 // Process a single Go file and extract declarations
@@ -85,66 +87,50 @@ func processFile(filePath string, fset *token.FileSet) error {
 		return fmt.Errorf("error parsing file %s: %v", filePath, err)
 	}
 
+	// Get relative path once for all declarations
+	relPath, err := filepath.Rel(workDir, filePath)
+	if err != nil {
+		relPath = filePath // fallback to absolute path if relative path calculation fails
+	}
+
 	// Walk through the AST and extract declarations
 	ast.Inspect(node, func(n ast.Node) bool {
 		switch decl := n.(type) {
 		case *ast.GenDecl:
-			processGenDecl(filePath, decl)
+			for _, spec := range decl.Specs {
+				switch s := spec.(type) {
+				case *ast.ValueSpec:
+					for i, name := range s.Names {
+						if includePrivate || name.IsExported() {
+							val := ""
+							if includeValues && len(s.Values) > i {
+								val = fmt.Sprintf(" = %s", formatValue(exprToString(s.Values[i])))
+							}
+							fmt.Printf("%s: var %s%s\n", relPath, name.Name, val)
+						}
+					}
+				case *ast.TypeSpec:
+					if includePrivate || s.Name.IsExported() {
+						fmt.Printf("%s: type %s\n", relPath, s.Name.Name)
+					}
+				}
+			}
 		case *ast.FuncDecl:
-			processFuncDecl(filePath, decl)
+			if includePrivate || decl.Name.IsExported() {
+				params := formatFieldList(decl.Type.Params)
+				results := formatFieldList(decl.Type.Results)
+
+				signature := fmt.Sprintf("func %s(%s)", decl.Name.Name, params)
+				if results != "" {
+					signature += " " + results
+				}
+				fmt.Printf("%s: %s\n", relPath, signature)
+			}
 		}
 		return true
 	})
 
 	return nil
-}
-
-// Process generic declarations (const, var, type)
-func processGenDecl(filePath string, decl *ast.GenDecl) {
-	// Get relative path
-	relPath, err := filepath.Rel(workDir, filePath)
-	if err != nil {
-		relPath = filePath // fallback to absolute path if relative path calculation fails
-	}
-
-	for _, spec := range decl.Specs {
-		switch s := spec.(type) {
-		case *ast.ValueSpec:
-			for i, name := range s.Names {
-				if includePrivate || name.IsExported() {
-					val := ""
-					if includeValues && len(s.Values) > i {
-						val = fmt.Sprintf(" = %s", formatValue(exprToString(s.Values[i])))
-					}
-					fmt.Printf("%s: var %s%s\n", relPath, name.Name, val)
-				}
-			}
-		case *ast.TypeSpec:
-			if includePrivate || s.Name.IsExported() {
-				fmt.Printf("%s: type %s\n", relPath, s.Name.Name)
-			}
-		}
-	}
-}
-
-// Process function declarations
-func processFuncDecl(filePath string, decl *ast.FuncDecl) {
-	// Get relative path
-	relPath, err := filepath.Rel(workDir, filePath)
-	if err != nil {
-		relPath = filePath // fallback to absolute path if relative path calculation fails
-	}
-
-	if includePrivate || decl.Name.IsExported() {
-		params := formatFieldList(decl.Type.Params)
-		results := formatFieldList(decl.Type.Results)
-
-		signature := fmt.Sprintf("func %s(%s)", decl.Name.Name, params)
-		if results != "" {
-			signature += " " + results
-		}
-		fmt.Printf("%s: %s\n", relPath, signature)
-	}
 }
 
 // Process a file or directory
