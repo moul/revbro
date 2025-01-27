@@ -14,7 +14,7 @@ import (
 
 var (
 	includePrivate bool
-	includeValues  bool
+	skipValues     bool
 	maxValueLength int
 	fileExtensions string
 	workDir        string
@@ -36,7 +36,7 @@ func run() error {
 
 	// Command-line arguments
 	flag.BoolVar(&includePrivate, "private", false, "include private (unexported) declarations")
-	flag.BoolVar(&includeValues, "values", false, "include right-hand side values")
+	flag.BoolVar(&skipValues, "no-values", false, "skip showing right-hand side values")
 	flag.IntVar(&maxValueLength, "max-length", 30, "maximum length for displayed values before truncating")
 	flag.StringVar(&fileExtensions, "ext", ".go", "comma-separated list of file extensions to process (e.g., .go,.gno)")
 	flag.Parse()
@@ -102,11 +102,17 @@ func processFile(filePath string, fset *token.FileSet) error {
 				case *ast.ValueSpec:
 					for i, name := range s.Names {
 						if includePrivate || name.IsExported() {
-							val := ""
-							if includeValues && len(s.Values) > i {
-								val = fmt.Sprintf(" = %s", formatValue(exprToString(s.Values[i])))
+							// Store type info but don't output it (for future use if needed)
+							typeStr := exprToString(s.Type)
+							if typeStr == "" && i < len(s.Values) {
+								typeStr = inferType(s.Values[i])
 							}
-							fmt.Printf("%s: var %s%s\n", relPath, name.Name, val)
+
+							val := ""
+							if (!skipValues || decl.Tok == token.CONST) && i < len(s.Values) {
+								val = fmt.Sprintf("= %s", formatValue(exprToString(s.Values[i])))
+							}
+							fmt.Printf("%s: var %s %s %s\n", relPath, name.Name, typeStr, val)
 						}
 					}
 				case *ast.TypeSpec:
@@ -213,4 +219,31 @@ func exprToString(expr ast.Expr) string {
 		}
 	}
 	return ""
+}
+
+// Helper function to infer type from an expression
+func inferType(expr ast.Expr) string {
+	switch v := expr.(type) {
+	case *ast.BasicLit:
+		switch v.Kind {
+		case token.INT:
+			return "int"
+		case token.FLOAT:
+			return "float64"
+		case token.STRING:
+			return "string"
+		case token.CHAR:
+			return "rune"
+		}
+	case *ast.Ident:
+		if v.Name == "true" || v.Name == "false" {
+			return "bool"
+		}
+	case *ast.CompositeLit:
+		// Check if it's a struct literal
+		if _, ok := v.Type.(*ast.StructType); ok {
+			return "struct"
+		}
+	}
+	return "interface{}" // fallback for unknown types
 }

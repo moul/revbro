@@ -68,7 +68,7 @@ func TestProcessFile(t *testing.T) {
 		name           string
 		code           string
 		includePrivate bool
-		includeValues  bool
+		skipValues     bool
 		want           []string
 	}{
 		{
@@ -79,7 +79,7 @@ func TestProcessFile(t *testing.T) {
 				type privateType struct{}
 				type PublicType interface{}`,
 			includePrivate: false,
-			includeValues:  false,
+			skipValues:     true,
 			want: []string{
 				"func PublicFunc(a string) int",
 				"type PublicType",
@@ -92,11 +92,11 @@ func TestProcessFile(t *testing.T) {
 				var Public = "visible"
 				var LongValue = "this is a very long string that should be truncated"`,
 			includePrivate: true,
-			includeValues:  true,
+			skipValues:     false,
 			want: []string{
-				"var Private = \"hidden\"",
-				"var Public = \"visible\"",
-				"var LongValue = \"this is a very long string th...",
+				`var Private string = "hidden"`,
+				`var Public string = "visible"`,
+				`var LongValue string = "this is a very long string th...`,
 			},
 		},
 		{
@@ -108,11 +108,56 @@ func TestProcessFile(t *testing.T) {
 					VeryLong = "this is a very long constant value that should be truncated"
 				)`,
 			includePrivate: true,
-			includeValues:  true,
+			skipValues:     true,
 			want: []string{
-				"var private = 1",
-				"var Public = 2",
-				"var VeryLong = \"this is a very long constant ...",
+				"var private int = 1",
+				"var Public int = 2",
+				`var VeryLong string = "this is a very long constant ...`,
+			},
+		},
+		{
+			name: "multiple declarations in one const block",
+			code: `package test
+				const (
+					First = 1
+					second = "two"
+					Third = 3.14
+					fourth = true
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"var First int = 1",
+				`var second string = "two"`,
+				"var Third float64 = 3.14",
+				"var fourth bool = true",
+			},
+		},
+		{
+			name: "interface with methods",
+			code: `package test
+				type Reader interface {
+					Read(p []byte) (n int, err error)
+					Close() error
+				}`,
+			includePrivate: false,
+			skipValues:     true,
+			want: []string{
+				"type Reader",
+			},
+		},
+		{
+			name: "struct with fields",
+			code: `package test
+				type Config struct {
+					Name    string
+					private int
+					Values  []string
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Config",
 			},
 		},
 	}
@@ -121,7 +166,7 @@ func TestProcessFile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set up test environment
 			includePrivate = tt.includePrivate
-			includeValues = tt.includeValues
+			skipValues = tt.skipValues
 			maxValueLength = 30
 
 			// Create temporary test file
@@ -165,7 +210,7 @@ func TestProcessPath(t *testing.T) {
 		name           string
 		files          map[string]string
 		includePrivate bool
-		includeValues  bool
+		skipValues     bool
 		want           []string
 		wantErr        bool
 	}{
@@ -179,7 +224,7 @@ func TestProcessPath(t *testing.T) {
 				"notgo.txt": "not a go file",
 			},
 			includePrivate: false,
-			includeValues:  false,
+			skipValues:     true,
 			want: []string{
 				"main.go: func Main()",
 				"subdir/helper.go: type Helper",
@@ -195,7 +240,7 @@ func TestProcessPath(t *testing.T) {
 					type Public struct{}`,
 			},
 			includePrivate: true,
-			includeValues:  false,
+			skipValues:     true,
 			want: []string{
 				"code.go: func private()",
 				"code.go: func Public()",
@@ -212,11 +257,11 @@ func TestProcessPath(t *testing.T) {
 					const Long = "this is a very long string that should be truncated"`,
 			},
 			includePrivate: true,
-			includeValues:  true,
+			skipValues:     false,
 			want: []string{
-				`vars.go: var private = "hidden"`,
-				`vars.go: var Public = "visible"`,
-				`vars.go: var Long = "this is a very long string th...`,
+				`vars.go: var private string = "hidden"`,
+				`vars.go: var Public string = "visible"`,
+				`vars.go: var Long string = "this is a very long string th...`,
 			},
 		},
 		{
@@ -230,7 +275,7 @@ func TestProcessPath(t *testing.T) {
 					type Type1 struct{}`,
 			},
 			includePrivate: false,
-			includeValues:  false,
+			skipValues:     true,
 			want: []string{
 				"pkg1/file1.go: func Func1()",
 				"pkg1/file2.go: func Func2()",
@@ -245,6 +290,43 @@ func TestProcessPath(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "empty go file",
+			files: map[string]string{
+				"empty.go": `package test`,
+			},
+			includePrivate: true,
+			skipValues:     true,
+			want:           []string{},
+		},
+		{
+			name: "file with comments only",
+			files: map[string]string{
+				"comments.go": `package test
+					// This is a comment
+					/* This is a block comment */`,
+			},
+			includePrivate: true,
+			skipValues:     true,
+			want:           []string{},
+		},
+		{
+			name: "mixed declarations",
+			files: map[string]string{
+				"mixed.go": `package test
+					var Version = "1.0.0"
+					type logger struct{ level int }
+					func NewLogger() *logger { return &logger{} }
+					const DEBUG = true`,
+			},
+			includePrivate: false,
+			skipValues:     false,
+			want: []string{
+				`mixed.go: var Version string = "1.0.0"`,
+				"mixed.go: func NewLogger() *logger",
+				"mixed.go: var DEBUG bool = true",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -254,7 +336,7 @@ func TestProcessPath(t *testing.T) {
 
 			// Set global variables for this test
 			includePrivate = tt.includePrivate
-			includeValues = tt.includeValues
+			skipValues = tt.skipValues
 			maxValueLength = 30
 			workDir = tmpDir
 
@@ -272,10 +354,6 @@ func TestProcessPath(t *testing.T) {
 				}
 				createdFiles = append(createdFiles, fullPath)
 			}
-
-			// Debug info
-			t.Logf("Working directory: %s", workDir)
-			t.Logf("Created files: %v", createdFiles)
 
 			// Run the test
 			var gotErr error
