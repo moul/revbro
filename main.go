@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -97,30 +98,7 @@ func processFile(filePath string, fset *token.FileSet) error {
 	ast.Inspect(node, func(n ast.Node) bool {
 		switch decl := n.(type) {
 		case *ast.GenDecl:
-			for _, spec := range decl.Specs {
-				switch s := spec.(type) {
-				case *ast.ValueSpec:
-					for i, name := range s.Names {
-						if includePrivate || name.IsExported() {
-							// Store type info but don't output it (for future use if needed)
-							typeStr := exprToString(s.Type)
-							if typeStr == "" && i < len(s.Values) {
-								typeStr = inferType(s.Values[i])
-							}
-
-							val := ""
-							if (!skipValues || decl.Tok == token.CONST) && i < len(s.Values) {
-								val = fmt.Sprintf("= %s", formatValue(exprToString(s.Values[i])))
-							}
-							fmt.Printf("%s: var %s %s %s\n", relPath, name.Name, typeStr, val)
-						}
-					}
-				case *ast.TypeSpec:
-					if includePrivate || s.Name.IsExported() {
-						fmt.Printf("%s: type %s\n", relPath, s.Name.Name)
-					}
-				}
-			}
+			processGenDecl(decl, fset)
 		case *ast.FuncDecl:
 			if includePrivate || decl.Name.IsExported() {
 				params := formatFieldList(decl.Type.Params)
@@ -156,7 +134,9 @@ func processPath(path string, fset *token.FileSet) error {
 	}
 
 	if fileInfo.IsDir() {
-		return filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		// Get all files first
+		var files []string
+		err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -164,12 +144,36 @@ func processPath(path string, fset *token.FileSet) error {
 				// Check if file has any of the specified extensions
 				for _, ext := range extensions {
 					if strings.HasSuffix(strings.ToLower(path), strings.ToLower(ext)) {
-						return processFile(path, fset)
+						absPath, err := filepath.Abs(path)
+						if err == nil {
+							files = append(files, absPath)
+						} else {
+							files = append(files, path)
+						}
+						break
 					}
 				}
 			}
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+
+		// Sort files by relative path
+		sort.Slice(files, func(i, j int) bool {
+			relI, _ := filepath.Rel(workDir, files[i])
+			relJ, _ := filepath.Rel(workDir, files[j])
+			return relI < relJ
+		})
+
+		// Process files in sorted order
+		for _, file := range files {
+			if err := processFile(file, fset); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// Check if single file has any of the specified extensions
@@ -239,11 +243,167 @@ func inferType(expr ast.Expr) string {
 		if v.Name == "true" || v.Name == "false" {
 			return "bool"
 		}
+		if v.Name == "iota" {
+			return "int"
+		}
+		// For enum types, return the identifier name as the type
+		if v.Obj != nil && v.Obj.Kind == ast.Typ {
+			return v.Name
+		}
+		return v.Name // Return the type name for custom types
 	case *ast.CompositeLit:
-		// Check if it's a struct literal
-		if _, ok := v.Type.(*ast.StructType); ok {
-			return "struct"
+		if t, ok := v.Type.(*ast.ArrayType); ok {
+			elemType := exprToString(t.Elt)
+			return "[]" + elemType
+		}
+		if m, ok := v.Type.(*ast.MapType); ok {
+			keyType := exprToString(m.Key)
+			valueType := exprToString(m.Value)
+			return fmt.Sprintf("map[%s]%s", keyType, valueType)
+		}
+		if s, ok := v.Type.(*ast.StructType); ok {
+			return "struct" + exprToString(s)
+		}
+		// For other composite literals, get the type string directly
+		return exprToString(v.Type)
+	case *ast.ArrayType:
+		elemType := exprToString(v.Elt)
+		return "[]" + elemType
+	case *ast.MapType:
+		keyType := exprToString(v.Key)
+		valueType := exprToString(v.Value)
+		return fmt.Sprintf("map[%s]%s", keyType, valueType)
+	case *ast.SelectorExpr:
+		// Handle package-qualified types (e.g., time.Time)
+		return exprToString(expr)
+	case *ast.StarExpr:
+		// Handle pointer types
+		return "*" + exprToString(v.X)
+	case *ast.UnaryExpr:
+		return inferType(v.X)
+	case *ast.BinaryExpr:
+		// For binary expressions (like iota + 1), use the left operand's type
+		return inferType(v.X)
+	}
+	return "" // Return empty string if type cannot be inferred
+}
+
+func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
+	switch decl.Tok {
+	case token.CONST, token.VAR:
+		var lastType ast.Expr
+		for _, spec := range decl.Specs {
+			if vs, ok := spec.(*ast.ValueSpec); ok {
+				// Get type from the ValueSpec if available
+				typeStr := ""
+				if vs.Type != nil {
+					typeStr = exprToString(vs.Type)
+					lastType = vs.Type
+				} else if lastType != nil {
+					typeStr = exprToString(lastType)
+				}
+
+				for i, name := range vs.Names {
+					if !includePrivate && !ast.IsExported(name.Name) {
+						continue
+					}
+
+					// Get relative path for output
+					relPath := filepath.Base(fset.Position(decl.Pos()).Filename)
+					if absPath, err := filepath.Abs(fset.Position(decl.Pos()).Filename); err == nil {
+						if rel, err := filepath.Rel(workDir, absPath); err == nil {
+							relPath = rel
+						}
+					}
+
+					// Handle values
+					valueStr := ""
+					if i < len(vs.Values) && vs.Values[i] != nil && !skipValues {
+						// Special handling for map literals
+						if cl, ok := vs.Values[i].(*ast.CompositeLit); ok && isMapType(cl.Type) {
+							valueStr = formatMapLiteral(cl)
+						} else {
+							valueStr = exprToString(vs.Values[i])
+						}
+						if len(valueStr) > maxValueLength {
+							valueStr = valueStr[:maxValueLength] + "..."
+						}
+					}
+
+					// If type is not explicitly specified, try to infer it
+					if typeStr == "" && i < len(vs.Values) && vs.Values[i] != nil {
+						typeStr = inferType(vs.Values[i])
+					}
+
+					// For const declarations, preserve the original values
+					if decl.Tok == token.CONST {
+						if i < len(vs.Values) && vs.Values[i] != nil {
+							valueStr = exprToString(vs.Values[i])
+							if len(valueStr) > maxValueLength {
+								valueStr = valueStr[:maxValueLength] + "..."
+							}
+						} else if i > 0 {
+							// For subsequent constants without values, use incremented value
+							prevValue := i
+							valueStr = fmt.Sprintf("%d", prevValue)
+						}
+					}
+
+					// Format the declaration
+					if valueStr != "" {
+						if typeStr != "" {
+							fmt.Printf("%s: var %s %s = %s\n", relPath, name.Name, typeStr, valueStr)
+						} else {
+							fmt.Printf("%s: var %s = %s\n", relPath, name.Name, valueStr)
+						}
+					} else {
+						if typeStr != "" {
+							fmt.Printf("%s: var %s %s\n", relPath, name.Name, typeStr)
+						} else {
+							fmt.Printf("%s: var %s\n", relPath, name.Name)
+						}
+					}
+				}
+			}
+		}
+	case token.TYPE:
+		for _, spec := range decl.Specs {
+			if ts, ok := spec.(*ast.TypeSpec); ok {
+				if includePrivate || ts.Name.IsExported() {
+					// Get relative path for output
+					relPath := filepath.Base(fset.Position(decl.Pos()).Filename)
+					if absPath, err := filepath.Abs(fset.Position(decl.Pos()).Filename); err == nil {
+						if rel, err := filepath.Rel(workDir, absPath); err == nil {
+							relPath = rel
+						}
+					}
+					fmt.Printf("%s: type %s\n", relPath, ts.Name.Name)
+				}
+			}
 		}
 	}
-	return "interface{}" // fallback for unknown types
+}
+
+// Helper function to check if an expression is a map type
+func isMapType(expr ast.Expr) bool {
+	_, ok := expr.(*ast.MapType)
+	return ok
+}
+
+// Helper function to format map literals correctly
+func formatMapLiteral(expr *ast.CompositeLit) string {
+	if m, ok := expr.Type.(*ast.MapType); ok {
+		keyType := exprToString(m.Key)
+		valueType := exprToString(m.Value)
+		elements := make([]string, 0, len(expr.Elts))
+		for _, elt := range expr.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				key := exprToString(kv.Key)
+				value := exprToString(kv.Value)
+				elements = append(elements, fmt.Sprintf("%s: %s", key, value))
+			}
+		}
+		return fmt.Sprintf("map[%s]%s{%s}", keyType, valueType, strings.Join(elements, ", "))
+	}
+	return exprToString(expr)
 }

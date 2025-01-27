@@ -160,6 +160,87 @@ func TestProcessFile(t *testing.T) {
 				"type Config",
 			},
 		},
+		{
+			name: "type aliases and type definitions",
+			code: `package test
+				type MyInt = int
+				type AliasString = string
+				type CustomInt int
+				type privateAlias = float64`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type MyInt",
+				"type AliasString",
+				"type CustomInt",
+				"type privateAlias",
+			},
+		},
+		{
+			name: "complex variable declarations",
+			code: `package test
+				var (
+					a, b = 1, 2
+					x, y, z string
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"var a int = 1",
+				"var b int = 2",
+				"var x string",
+				"var y string",
+				"var z string",
+			},
+		},
+		{
+			name: "function declarations with complex signatures",
+			code: `package test
+				func (s *Server) HandleRequest(ctx context.Context, req *Request) (*Response, error) { return nil, nil }
+				func GenericFunc[T any](items []T) T { return *new(T) }
+				func (t *Thing[K, V]) Process(key K) (V, bool) { return *new(V), false }`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"func HandleRequest(ctx context.Context, req *Request) *Response, error",
+				"func GenericFunc(items []T) T",
+				"func Process(key K) V, bool",
+			},
+		},
+		{
+			name: "empty variable declarations",
+			code: `package test
+				var (
+					a int
+					b string
+					c []byte
+				)`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"var a int",
+				"var b string",
+				"var c []byte",
+			},
+		},
+		{
+			name: "iota constants with type inference",
+			code: `package test
+				type Day int
+				const (
+					Sunday Day = iota
+					Monday
+					Tuesday
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"type Day",
+				"var Sunday Day = iota",
+				"var Monday Day",
+				"var Tuesday Day",
+			},
+		},
 	}
 
 	for _, tt := range tests {
