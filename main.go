@@ -310,6 +310,11 @@ func inferType(expr ast.Expr) string {
 }
 
 func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
+	// Only process top-level declarations
+	if !isTopLevel(fset.Position(decl.Pos())) {
+		return
+	}
+
 	switch decl.Tok {
 	case token.CONST, token.VAR:
 		var lastType ast.Expr
@@ -406,6 +411,11 @@ func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
 			}
 		}
 	}
+}
+
+// Helper function to check if a position represents a top-level declaration
+func isTopLevel(pos token.Position) bool {
+	return pos.Line > 0 && pos.Column == 1
 }
 
 // Helper function to check if an expression is a map type
