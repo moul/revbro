@@ -14,11 +14,12 @@ import (
 )
 
 var (
-	includePrivate bool
-	skipValues     bool
-	maxValueLength int
-	fileExtensions string
-	workDir        string
+	includePrivate  bool
+	skipValues      bool
+	maxValueLength  int
+	fileExtensions  string
+	excludeSuffixes string
+	workDir         string
 )
 
 func main() {
@@ -40,6 +41,7 @@ func run() error {
 	flag.BoolVar(&skipValues, "no-values", false, "skip showing right-hand side values")
 	flag.IntVar(&maxValueLength, "max-length", 30, "maximum length for displayed values before truncating")
 	flag.StringVar(&fileExtensions, "ext", ".go", "comma-separated list of file extensions to process (e.g., .go,.gno)")
+	flag.StringVar(&excludeSuffixes, "exclude", "_test.go", "comma-separated list of file suffixes to exclude (e.g., _test.go,_mock.go)")
 	flag.Parse()
 
 	// Get file paths from arguments
@@ -133,6 +135,12 @@ func processPath(path string, fset *token.FileSet) error {
 		}
 	}
 
+	// Split exclude suffixes into a slice and normalize them
+	excludes := strings.Split(excludeSuffixes, ",")
+	for i, suffix := range excludes {
+		excludes[i] = strings.TrimSpace(suffix)
+	}
+
 	if fileInfo.IsDir() {
 		// Get all files first
 		var files []string
@@ -141,6 +149,13 @@ func processPath(path string, fset *token.FileSet) error {
 				return err
 			}
 			if !info.IsDir() {
+				// Check if file should be excluded based on suffix
+				for _, suffix := range excludes {
+					if strings.HasSuffix(strings.ToLower(path), strings.ToLower(suffix)) {
+						return nil
+					}
+				}
+
 				// Check if file has any of the specified extensions
 				for _, ext := range extensions {
 					if strings.HasSuffix(strings.ToLower(path), strings.ToLower(ext)) {
@@ -174,6 +189,13 @@ func processPath(path string, fset *token.FileSet) error {
 			}
 		}
 		return nil
+	}
+
+	// Check if single file should be excluded based on suffix
+	for _, suffix := range excludes {
+		if strings.HasSuffix(strings.ToLower(path), strings.ToLower(suffix)) {
+			return nil
+		}
 	}
 
 	// Check if single file has any of the specified extensions
