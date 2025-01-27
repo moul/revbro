@@ -241,6 +241,54 @@ func TestProcessFile(t *testing.T) {
 				"var Tuesday Day",
 			},
 		},
+		{
+			name: "complex interface type",
+			code: `package test
+				type Handler interface {
+					Handle(ctx context.Context) error
+					Process(data []byte) (int, error)
+					Close() error
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Handler interface { Handle(ctx context.Context) error; Process(data []byte) (int, error); Close() error }",
+			},
+		},
+		{
+			name: "complex struct type",
+			code: `package test
+				type Configuration struct {
+					Name        string
+					Port       int
+					Handlers   []Handler
+					Options    map[string]interface{}
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Configuration struct { Name string; Port int; Handlers []Handler; Options map[string]interface{} }",
+			},
+		},
+		{
+			name: "nested types",
+			code: `package test
+				type Service struct {
+					Config struct {
+						Timeout int
+						Retries int
+					}
+					Handler interface {
+						Process() error
+						Cleanup()
+					}
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Service struct { Config struct { Timeout int; Retries int }; Handler interface { Process() error; Cleanup() } }",
+			},
+		},
 	}
 
 	for _, tt := range tests {

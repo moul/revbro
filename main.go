@@ -198,18 +198,17 @@ func formatFieldList(fl *ast.FieldList) string {
 	if fl == nil {
 		return ""
 	}
-
 	var parts []string
 	for _, field := range fl.List {
-		typeStr := exprToString(field.Type)
-		for _, name := range field.Names {
-			parts = append(parts, fmt.Sprintf("%s %s", name.Name, typeStr))
-		}
-		if len(field.Names) == 0 {
+		typeStr := strings.TrimSpace(strings.ReplaceAll(exprToString(field.Type), "\n", " "))
+		if len(field.Names) > 0 {
+			for _, name := range field.Names {
+				parts = append(parts, name.Name+" "+typeStr)
+			}
+		} else {
 			parts = append(parts, typeStr)
 		}
 	}
-
 	return strings.Join(parts, ", ")
 }
 
@@ -377,7 +376,10 @@ func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
 							relPath = rel
 						}
 					}
-					fmt.Printf("%s: type %s\n", relPath, ts.Name.Name)
+
+					// Format type with semicolons for struct and interface fields
+					typeStr := formatTypeWithSemicolons(ts.Type)
+					fmt.Printf("%s: type %s %s\n", relPath, ts.Name.Name, typeStr)
 				}
 			}
 		}
@@ -406,4 +408,78 @@ func formatMapLiteral(expr *ast.CompositeLit) string {
 		return fmt.Sprintf("map[%s]%s{%s}", keyType, valueType, strings.Join(elements, ", "))
 	}
 	return exprToString(expr)
+}
+
+// Add this new helper function
+func formatTypeWithSemicolons(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StructType:
+		if t.Fields == nil || len(t.Fields.List) == 0 {
+			return "struct {}"
+		}
+		fields := make([]string, 0, len(t.Fields.List))
+		for _, field := range t.Fields.List {
+			var fieldStr string
+			if len(field.Names) > 0 {
+				names := make([]string, 0, len(field.Names))
+				for _, name := range field.Names {
+					names = append(names, name.Name)
+				}
+				// Handle nested types recursively
+				typeStr := formatTypeWithSemicolons(field.Type)
+				fieldStr = strings.Join(names, ", ") + " " + typeStr
+			} else {
+				// Handle embedded types recursively
+				fieldStr = formatTypeWithSemicolons(field.Type)
+			}
+			fields = append(fields, strings.TrimSpace(fieldStr))
+		}
+		return "struct { " + strings.Join(fields, "; ") + " }"
+	case *ast.InterfaceType:
+		if t.Methods == nil || len(t.Methods.List) == 0 {
+			return "interface{}"
+		}
+		methods := make([]string, 0, len(t.Methods.List))
+		for _, method := range t.Methods.List {
+			if len(method.Names) > 0 {
+				for _, name := range method.Names {
+					// Handle method type specifically
+					if ft, ok := method.Type.(*ast.FuncType); ok {
+						params := formatFieldList(ft.Params)
+						results := formatMethodResults(ft.Results)
+						methodStr := name.Name + "(" + params + ")"
+						if results != "" {
+							methodStr += " " + results
+						}
+						methods = append(methods, methodStr)
+					}
+				}
+			} else {
+				// Embedded interface
+				methods = append(methods, strings.TrimSpace(formatTypeWithSemicolons(method.Type)))
+			}
+		}
+		return "interface { " + strings.Join(methods, "; ") + " }"
+	default:
+		return strings.ReplaceAll(strings.TrimSpace(exprToString(expr)), "\n", " ")
+	}
+}
+
+// Helper function to format method results with proper parentheses
+func formatMethodResults(fl *ast.FieldList) string {
+	if fl == nil {
+		return ""
+	}
+	if len(fl.List) == 0 {
+		return ""
+	}
+
+	resultStr := formatFieldList(fl)
+
+	// Add parentheses if there are multiple results or named results
+	needParens := len(fl.List) > 1 || (len(fl.List) == 1 && len(fl.List[0].Names) > 0)
+	if needParens {
+		return "(" + resultStr + ")"
+	}
+	return resultStr
 }
