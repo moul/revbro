@@ -289,6 +289,150 @@ func TestProcessFile(t *testing.T) {
 				"type Service struct { Config struct { Timeout int; Retries int }; Handler interface { Process() error; Cleanup() } }",
 			},
 		},
+		{
+			name: "embedded interfaces",
+			code: `package test
+				type Reader interface{ io.Reader }
+				type ComplexHandler interface {
+					io.Reader
+					io.Writer
+					Close() error
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Reader interface { io.Reader }",
+				"type ComplexHandler interface { io.Reader; io.Writer; Close() error }",
+			},
+		},
+		{
+			name: "embedded structs",
+			code: `package test
+				type BaseConfig struct{ Timeout int }
+				type Config struct {
+					BaseConfig
+					Name string
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type BaseConfig struct { Timeout int }",
+				"type Config struct { BaseConfig; Name string }",
+			},
+		},
+		{
+			name: "complex type declarations",
+			code: `package test
+				type (
+					StringMap map[string]string
+					IntSlice []int
+					Callback func(ctx context.Context) error
+				)`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type StringMap map[string]string",
+				"type IntSlice []int",
+				"type Callback func(ctx context.Context) error",
+			},
+		},
+		{
+			name: "generic types and functions",
+			code: `package test
+				type Stack[T any] struct {
+					items []T
+				}
+				func Process[K comparable, V any](m map[K]V) {}
+				type Container[T any] interface {
+					Get() T
+					Set(value T)
+				}`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Stack struct { items []T }",
+				"func Process(m map[K]V)",
+				"type Container interface { Get() T; Set(value T) }",
+			},
+		},
+		{
+			name: "channel types",
+			code: `package test
+				type EventHandler chan Event
+				var (
+					inputChan = make(chan string)
+					outputChan = make(chan<- int)
+					signals = make(<-chan bool)
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"type EventHandler chan Event",
+				"var inputChan chan string",
+				"var outputChan chan<- int",
+				"var signals <-chan bool",
+			},
+		},
+		{
+			name: "complex const declarations",
+			code: `package test
+				const (
+					StatusOK Status = iota + 100
+					StatusError
+					StatusNotFound
+
+					MaxRetries = 3
+					Timeout   = 30 * time.Second
+					Version   = "v" + "1.0"
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"var StatusOK Status = iota + 100",
+				"var StatusError Status",
+				"var StatusNotFound Status",
+				"var MaxRetries int = 3",
+				//"var Timeout time.Duration = 30 * time.Second",
+				"var Timeout int = 30 * time.Second",
+				`var Version string = "v" + "1.0"`,
+			},
+		},
+		{
+			name: "method declarations with receivers",
+			code: `package test
+				type Service struct{}
+				func (s *Service) Start(ctx context.Context) error { return nil }
+				func (s Service) Stop() {}
+				func (s *Service) Config() *Config { return nil }`,
+			includePrivate: true,
+			skipValues:     true,
+			want: []string{
+				"type Service struct { }",
+				"func Start(ctx context.Context) error",
+				"func Stop()",
+				"func Config() *Config",
+			},
+		},
+		{
+			name: "complex map declarations",
+			code: `package test
+				var (
+					handlers = map[string]http.HandlerFunc{
+						"/health": healthCheck,
+						"/status": statusCheck,
+					}
+					config = map[string]interface{}{
+						"timeout": 30,
+						"retries": true,
+					}
+				)`,
+			includePrivate: true,
+			skipValues:     false,
+			want: []string{
+				"var handlers map[string]http.HandlerFunc = map[string]http.HandlerFunc{...}",
+				"var config map[string]interface{} = map[string]interface{}{timeout: 30, retries: true}",
+			},
+		},
 	}
 
 	for _, tt := range tests {

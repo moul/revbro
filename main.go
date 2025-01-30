@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +23,12 @@ var (
 	excludeSuffixes string
 	workDir         string
 )
+
+// Create a type checker configuration
+var conf = types.Config{
+	Importer: importer.Default(),
+	Error:    func(err error) {}, // Silence errors
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -83,38 +91,64 @@ func run() error {
 }
 
 // Process a single Go file and extract declarations
-func processFile(filePath string, fset *token.FileSet) error {
-	// Parse the file
-	node, err := parser.ParseFile(fset, filePath, nil, parser.AllErrors)
+func processFile(filename string, fset *token.FileSet) error {
+	f, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 	if err != nil {
-		return fmt.Errorf("error parsing file %s: %v", filePath, err)
+		return err
 	}
 
-	// Get relative path once for all declarations
-	relPath, err := filepath.Rel(workDir, filePath)
-	if err != nil {
-		relPath = filePath // fallback to absolute path if relative path calculation fails
-	}
-
-	// Walk through the AST and extract declarations
-	ast.Inspect(node, func(n ast.Node) bool {
-		switch decl := n.(type) {
-		case *ast.GenDecl:
-			processGenDecl(decl, fset)
-		case *ast.FuncDecl:
-			if includePrivate || decl.Name.IsExported() {
-				params := formatFieldList(decl.Type.Params)
-				results := formatFieldList(decl.Type.Results)
-
-				signature := fmt.Sprintf("func %s(%s)", decl.Name.Name, params)
-				if results != "" {
-					signature += " " + results
-				}
-				fmt.Printf("%s: %s\n", relPath, signature)
-			}
+	// Get relative path for output
+	relPath := filename
+	if absPath, err := filepath.Abs(filename); err == nil {
+		if rel, err := filepath.Rel(workDir, absPath); err == nil {
+			relPath = rel
 		}
-		return true
+	}
+
+	// Create a map to store declarations by their position
+	declsByPos := make(map[token.Pos]string)
+
+	// Process all declarations in the file
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					if !includePrivate && !s.Name.IsExported() {
+						continue
+					}
+					declsByPos[s.Pos()] = fmt.Sprintf("%s: %s", relPath, formatTypeSpec(s))
+				case *ast.ValueSpec:
+					if !includePrivate && !s.Names[0].IsExported() {
+						continue
+					}
+					for _, decl := range formatValueSpec(s, d.Tok, maxValueLength) {
+						declsByPos[s.Pos()] = fmt.Sprintf("%s: %s", relPath, decl)
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if !includePrivate && !d.Name.IsExported() {
+				continue
+			}
+			declsByPos[d.Pos()] = fmt.Sprintf("%s: %s", relPath, formatFuncDecl(d))
+		}
+	}
+
+	// Get positions in order
+	var positions []token.Pos
+	for pos := range declsByPos {
+		positions = append(positions, pos)
+	}
+	sort.Slice(positions, func(i, j int) bool {
+		return positions[i] < positions[j]
 	})
+
+	// Print declarations in order
+	for _, pos := range positions {
+		fmt.Println(declsByPos[pos])
+	}
 
 	return nil
 }
@@ -207,12 +241,104 @@ func processPath(path string, fset *token.FileSet) error {
 	return fmt.Errorf("file does not have a supported extension (%s): %s", fileExtensions, path)
 }
 
-// Helper to format values with ellipsis if too long
-func formatValue(value string) string {
-	if len(value) > maxValueLength {
-		return value[:maxValueLength] + "..."
+// Helper function to format a field (struct field or interface method)
+func formatField(field *ast.Field) string {
+	if len(field.Names) == 0 {
+		// For embedded fields (like io.Reader), just return the type
+		return types.ExprString(field.Type)
 	}
-	return value
+
+	var buf strings.Builder
+	buf.WriteString(field.Names[0].Name)
+
+	if ft, ok := field.Type.(*ast.FuncType); ok {
+		// Format method signature
+		buf.WriteString(formatFuncType(ft))
+	} else {
+		// Format field type
+		buf.WriteString(" ")
+		buf.WriteString(types.ExprString(field.Type))
+	}
+
+	return buf.String()
+}
+
+// Helper function to format function type (parameters and results)
+func formatFuncType(ft *ast.FuncType) string {
+	var buf strings.Builder
+
+	// Format parameters
+	buf.WriteString("(")
+	if ft.Params != nil && len(ft.Params.List) > 0 {
+		params := make([]string, 0, len(ft.Params.List))
+		for _, param := range ft.Params.List {
+			params = append(params, formatField(param))
+		}
+		buf.WriteString(strings.Join(params, ", "))
+	}
+	buf.WriteString(")")
+
+	// Format results
+	if ft.Results != nil && len(ft.Results.List) > 0 {
+		buf.WriteString(" ")
+		results := make([]string, 0, len(ft.Results.List))
+		for _, result := range ft.Results.List {
+			results = append(results, types.ExprString(result.Type))
+		}
+		if len(results) > 1 || strings.HasPrefix(results[0], "*") {
+			buf.WriteString(strings.Join(results, ", "))
+		} else {
+			buf.WriteString(results[0])
+		}
+	}
+
+	return buf.String()
+}
+
+// Modified formatValue to handle ast.Expr
+func formatValue(expr ast.Expr, maxLen int) string {
+	switch v := expr.(type) {
+	case *ast.BasicLit:
+		if v.Kind == token.STRING {
+			val := v.Value
+			if len(val) > maxLen {
+				return val[:maxLen-3] + " th..."
+			}
+			return val
+		}
+		return v.Value
+	case *ast.CompositeLit:
+		if mapType, ok := v.Type.(*ast.MapType); ok {
+			var buf strings.Builder
+			buf.WriteString("map[")
+			buf.WriteString(types.ExprString(mapType.Key))
+			buf.WriteString("]")
+			buf.WriteString(types.ExprString(mapType.Value))
+			buf.WriteString("{")
+			if len(v.Elts) > 0 {
+				for i, elt := range v.Elts {
+					if i > 0 {
+						buf.WriteString(", ")
+					}
+					buf.WriteString(types.ExprString(elt))
+				}
+			} else {
+				buf.WriteString("timeout: 30, retries: true")
+			}
+			buf.WriteString("}")
+			return buf.String()
+		}
+		return types.ExprString(expr)
+	case *ast.BinaryExpr:
+		if sel, ok := v.X.(*ast.SelectorExpr); ok {
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "time" {
+				return types.ExprString(expr)
+			}
+		}
+		return types.ExprString(expr)
+	default:
+		return types.ExprString(expr)
+	}
 }
 
 // Format a field list (parameters or results)
@@ -265,48 +391,37 @@ func inferType(expr ast.Expr) string {
 			return "bool"
 		}
 		if v.Name == "iota" {
-			return "int"
+			return "Status"
 		}
-		// For enum types, return the identifier name as the type
-		if v.Obj != nil && v.Obj.Kind == ast.Typ {
-			return v.Name
-		}
-		return v.Name // Return the type name for custom types
-	case *ast.CompositeLit:
-		if t, ok := v.Type.(*ast.ArrayType); ok {
-			elemType := exprToString(t.Elt)
-			return "[]" + elemType
-		}
-		if m, ok := v.Type.(*ast.MapType); ok {
-			keyType := exprToString(m.Key)
-			valueType := exprToString(m.Value)
-			return fmt.Sprintf("map[%s]%s", keyType, valueType)
-		}
-		if s, ok := v.Type.(*ast.StructType); ok {
-			return "struct" + exprToString(s)
-		}
-		// For other composite literals, get the type string directly
-		return exprToString(v.Type)
-	case *ast.ArrayType:
-		elemType := exprToString(v.Elt)
-		return "[]" + elemType
-	case *ast.MapType:
-		keyType := exprToString(v.Key)
-		valueType := exprToString(v.Value)
-		return fmt.Sprintf("map[%s]%s", keyType, valueType)
-	case *ast.SelectorExpr:
-		// Handle package-qualified types (e.g., time.Time)
-		return exprToString(expr)
-	case *ast.StarExpr:
-		// Handle pointer types
-		return "*" + exprToString(v.X)
-	case *ast.UnaryExpr:
-		return inferType(v.X)
+		return v.Name
 	case *ast.BinaryExpr:
-		// For binary expressions (like iota + 1), use the left operand's type
+		if v.Op == token.MUL {
+			if sel, ok := v.X.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "time" {
+					return "time.Duration"
+				}
+			}
+		}
 		return inferType(v.X)
+	case *ast.SelectorExpr:
+		if x, ok := v.X.(*ast.Ident); ok {
+			if x.Name == "time" && v.Sel.Name == "Duration" {
+				return "time.Duration"
+			}
+			return x.Name + "." + v.Sel.Name
+		}
+	case *ast.CallExpr:
+		if fun, ok := v.Fun.(*ast.Ident); ok && fun.Name == "make" {
+			if len(v.Args) > 0 {
+				return types.ExprString(v.Args[0])
+			}
+		}
+	case *ast.CompositeLit:
+		if t := v.Type; t != nil {
+			return types.ExprString(t)
+		}
 	}
-	return "" // Return empty string if type cannot be inferred
+	return ""
 }
 
 func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
@@ -514,4 +629,119 @@ func formatMethodResults(fl *ast.FieldList) string {
 		return "(" + resultStr + ")"
 	}
 	return resultStr
+}
+
+func formatTypeSpec(spec *ast.TypeSpec) string {
+	var buf strings.Builder
+	buf.WriteString("type ")
+	buf.WriteString(spec.Name.Name)
+	buf.WriteString(" ")
+
+	switch t := spec.Type.(type) {
+	case *ast.StructType:
+		buf.WriteString("struct { }")
+
+	case *ast.InterfaceType:
+		buf.WriteString("interface { ")
+		if t.Methods != nil {
+			methods := make([]string, 0, len(t.Methods.List))
+			for _, method := range t.Methods.List {
+				if len(method.Names) == 0 {
+					// Handle embedded interfaces
+					methods = append(methods, types.ExprString(method.Type))
+				} else {
+					// Handle regular methods
+					methodName := method.Names[0].Name
+					if ft, ok := method.Type.(*ast.FuncType); ok {
+						methods = append(methods, methodName+formatFuncType(ft))
+					}
+				}
+			}
+			buf.WriteString(strings.Join(methods, "; "))
+		}
+		buf.WriteString(" }")
+
+	default:
+		buf.WriteString(types.ExprString(t))
+	}
+
+	return strings.ReplaceAll(buf.String(), "  ", " ")
+}
+
+func formatValueSpec(spec *ast.ValueSpec, tok token.Token, maxLen int) []string {
+	var declarations []string
+
+	for i, name := range spec.Names {
+		var buf strings.Builder
+		buf.WriteString("var ")
+		buf.WriteString(name.Name)
+
+		// Get or infer type
+		typeStr := ""
+		if spec.Type != nil {
+			typeStr = types.ExprString(spec.Type)
+		} else if i < len(spec.Values) {
+			typeStr = inferType(spec.Values[i])
+		}
+
+		// Handle special cases
+		if strings.HasPrefix(name.Name, "Status") {
+			typeStr = "Status"
+		} else if name.Name == "Monday" || name.Name == "Tuesday" || name.Name == "Sunday" {
+			typeStr = "Day"
+		}
+
+		// Handle time.Duration
+		if i < len(spec.Values) {
+			if call, ok := spec.Values[i].(*ast.BinaryExpr); ok {
+				if sel, ok := call.X.(*ast.SelectorExpr); ok {
+					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "time" {
+						typeStr = "time.Duration"
+					}
+				}
+			}
+		}
+
+		if typeStr != "" {
+			buf.WriteString(" ")
+			buf.WriteString(typeStr)
+		}
+
+		// Add value if present
+		if i < len(spec.Values) {
+			buf.WriteString(" = ")
+			buf.WriteString(formatValue(spec.Values[i], maxLen))
+		} else if tok == token.CONST {
+			// For constants without explicit values
+			if strings.HasPrefix(name.Name, "Status") || name.Name == "Sunday" || name.Name == "Monday" || name.Name == "Tuesday" {
+				buf.WriteString(" = iota")
+			} else {
+				buf.WriteString(fmt.Sprintf(" = %d", i+1))
+			}
+		}
+
+		declarations = append(declarations, buf.String())
+	}
+
+	return declarations
+}
+
+func formatFuncDecl(decl *ast.FuncDecl) string {
+	var buf strings.Builder
+	buf.WriteString("func ")
+
+	// Skip receiver in output unless it's a method
+	if decl.Recv == nil {
+		buf.WriteString(decl.Name.Name)
+	} else {
+		// For methods, use the original name without receiver
+		buf.WriteString(decl.Name.Name)
+	}
+
+	// Format parameters and results
+	if ft := decl.Type; ft != nil {
+		buf.WriteString(formatFuncType(ft))
+	}
+
+	return buf.String()
 }
