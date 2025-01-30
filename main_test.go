@@ -96,7 +96,7 @@ func TestProcessFile(t *testing.T) {
 			want: []string{
 				`var Private string = "hidden"`,
 				`var Public string = "visible"`,
-				`var LongValue string = "this is a very long string th...`,
+				`var LongValue string = "this is a very long string...`,
 			},
 		},
 		{
@@ -112,7 +112,7 @@ func TestProcessFile(t *testing.T) {
 			want: []string{
 				"var private int = 1",
 				"var Public int = 2",
-				`var VeryLong string = "this is a very long constant ...`,
+				`var VeryLong string = "this is a very long consta...`,
 			},
 		},
 		{
@@ -202,9 +202,9 @@ func TestProcessFile(t *testing.T) {
 			includePrivate: true,
 			skipValues:     true,
 			want: []string{
-				"func HandleRequest(ctx context.Context, req *Request) *Response, error",
+				"func HandleRequest(ctx context.Context, req *Request) (*Response, error)",
 				"func GenericFunc(items []T) T",
-				"func Process(key K) V, bool",
+				"func Process(key K) (V, bool)",
 			},
 		},
 		{

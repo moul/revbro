@@ -658,7 +658,7 @@ func formatTypeSpec(spec *ast.TypeSpec) string {
 				} else {
 					// Handle regular fields
 					fieldName := field.Names[0].Name
-					fieldType := types.ExprString(field.Type)
+					fieldType := formatType(field.Type)
 					fields = append(fields, fmt.Sprintf("%s %s", fieldName, fieldType))
 				}
 			}
@@ -691,6 +691,52 @@ func formatTypeSpec(spec *ast.TypeSpec) string {
 	}
 
 	return strings.ReplaceAll(buf.String(), "  ", " ")
+}
+
+func formatType(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StructType:
+		var buf strings.Builder
+		buf.WriteString("struct { ")
+		if t.Fields != nil {
+			fields := make([]string, 0, len(t.Fields.List))
+			for _, field := range t.Fields.List {
+				if len(field.Names) == 0 {
+					fields = append(fields, types.ExprString(field.Type))
+				} else {
+					fieldName := field.Names[0].Name
+					fieldType := types.ExprString(field.Type)
+					fields = append(fields, fmt.Sprintf("%s %s", fieldName, fieldType))
+				}
+			}
+			buf.WriteString(strings.Join(fields, "; "))
+		}
+		buf.WriteString(" }")
+		return buf.String()
+
+	case *ast.InterfaceType:
+		var buf strings.Builder
+		buf.WriteString("interface { ")
+		if t.Methods != nil {
+			methods := make([]string, 0, len(t.Methods.List))
+			for _, method := range t.Methods.List {
+				if len(method.Names) == 0 {
+					methods = append(methods, types.ExprString(method.Type))
+				} else {
+					methodName := method.Names[0].Name
+					if ft, ok := method.Type.(*ast.FuncType); ok {
+						methods = append(methods, methodName+formatFuncType(ft))
+					}
+				}
+			}
+			buf.WriteString(strings.Join(methods, "; "))
+		}
+		buf.WriteString(" }")
+		return buf.String()
+
+	default:
+		return types.ExprString(expr)
+	}
 }
 
 func formatValueSpec(spec *ast.ValueSpec, tok token.Token, maxLen int) []string {
