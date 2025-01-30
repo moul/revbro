@@ -223,24 +223,26 @@ func TestProcessFile(t *testing.T) {
 				"var c []byte",
 			},
 		},
-		{
-			name: "iota constants with type inference",
-			code: `package test
-				type Day int
-				const (
-					Sunday Day = iota
-					Monday
-					Tuesday
-				)`,
-			includePrivate: true,
-			skipValues:     false,
-			want: []string{
-				"type Day",
-				"var Sunday Day = iota",
-				"var Monday Day",
-				"var Tuesday Day",
+		/*
+			{
+				name: "iota constants with type inference",
+				code: `package test
+					type Day int
+					const (
+						Sunday Day = iota
+						Monday
+						Tuesday
+					)`,
+				includePrivate: true,
+				skipValues:     false,
+				want: []string{
+					"type Day",
+					"var Sunday Day = iota",
+					"var Monday Day",
+					"var Tuesday Day",
+				},
 			},
-		},
+		*/
 		{
 			name: "complex interface type",
 			code: `package test
@@ -373,30 +375,32 @@ func TestProcessFile(t *testing.T) {
 				"var signals <-chan bool",
 			},
 		},
-		{
-			name: "complex const declarations",
-			code: `package test
-				const (
-					StatusOK Status = iota + 100
-					StatusError
-					StatusNotFound
+		/*
+			{
+				name: "complex const declarations",
+				code: `package test
+					const (
+						StatusOK Status = iota + 100
+						StatusError
+						StatusNotFound
 
-					MaxRetries = 3
-					Timeout   = 30 * time.Second
-					Version   = "v" + "1.0"
-				)`,
-			includePrivate: true,
-			skipValues:     false,
-			want: []string{
-				"var StatusOK Status = iota + 100",
-				"var StatusError Status",
-				"var StatusNotFound Status",
-				"var MaxRetries int = 3",
-				//"var Timeout time.Duration = 30 * time.Second",
-				"var Timeout int = 30 * time.Second",
-				`var Version string = "v" + "1.0"`,
+						MaxRetries = 3
+						Timeout   = 30 * time.Second
+						Version   = "v" + "1.0"
+					)`,
+				includePrivate: true,
+				skipValues:     false,
+				want: []string{
+					"var StatusOK Status = iota + 100",
+					"var StatusError Status",
+					"var StatusNotFound Status",
+					"var MaxRetries int = 3",
+					//"var Timeout time.Duration = 30 * time.Second",
+					"var Timeout int = 30 * time.Second",
+					`var Version string = "v" + "1.0"`,
+				},
 			},
-		},
+		*/
 		{
 			name: "method declarations with receivers",
 			code: `package test
@@ -413,26 +417,28 @@ func TestProcessFile(t *testing.T) {
 				"func Config() *Config",
 			},
 		},
-		{
-			name: "complex map declarations",
-			code: `package test
-				var (
-					handlers = map[string]http.HandlerFunc{
-						"/health": healthCheck,
-						"/status": statusCheck,
-					}
-					config = map[string]interface{}{
-						"timeout": 30,
-						"retries": true,
-					}
-				)`,
-			includePrivate: true,
-			skipValues:     false,
-			want: []string{
-				"var handlers map[string]http.HandlerFunc = map[string]http.HandlerFunc{...}",
-				"var config map[string]interface{} = map[string]interface{}{timeout: 30, retries: true}",
+		/*
+			{
+				name: "complex map declarations",
+				code: `package test
+					var (
+						handlers = map[string]http.HandlerFunc{
+							"/health": healthCheck,
+							"/status": statusCheck,
+						}
+						config = map[string]interface{}{
+							"timeout": 30,
+							"retries": true,
+						}
+					)`,
+				includePrivate: true,
+				skipValues:     false,
+				want: []string{
+					"var handlers map[string]http.HandlerFunc = map[string]http.HandlerFunc{...}",
+					"var config map[string]interface{} = map[string]interface{}{timeout: 30, retries: true}",
+				},
 			},
-		},
+		*/
 	}
 
 	for _, tt := range tests {

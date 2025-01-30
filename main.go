@@ -106,7 +106,7 @@ func processFile(filename string, fset *token.FileSet) error {
 	}
 
 	// Create a map to store declarations by their position
-	declsByPos := make(map[token.Pos]string)
+	declsByPos := make(map[token.Pos][]string)
 
 	// Process all declarations in the file
 	for _, decl := range f.Decls {
@@ -118,13 +118,14 @@ func processFile(filename string, fset *token.FileSet) error {
 					if !includePrivate && !s.Name.IsExported() {
 						continue
 					}
-					declsByPos[s.Pos()] = fmt.Sprintf("%s: %s", relPath, formatTypeSpec(s))
+					declsByPos[s.Pos()] = []string{fmt.Sprintf("%s: %s", relPath, formatTypeSpec(s))}
 				case *ast.ValueSpec:
 					if !includePrivate && !s.Names[0].IsExported() {
 						continue
 					}
-					for _, decl := range formatValueSpec(s, d.Tok, maxValueLength) {
-						declsByPos[s.Pos()] = fmt.Sprintf("%s: %s", relPath, decl)
+					decls := formatValueSpec(s, d.Tok, maxValueLength)
+					for _, decl := range decls {
+						declsByPos[s.Pos()] = append(declsByPos[s.Pos()], fmt.Sprintf("%s: %s", relPath, decl))
 					}
 				}
 			}
@@ -132,7 +133,7 @@ func processFile(filename string, fset *token.FileSet) error {
 			if !includePrivate && !d.Name.IsExported() {
 				continue
 			}
-			declsByPos[d.Pos()] = fmt.Sprintf("%s: %s", relPath, formatFuncDecl(d))
+			declsByPos[d.Pos()] = []string{fmt.Sprintf("%s: %s", relPath, formatFuncDecl(d))}
 		}
 	}
 
@@ -147,7 +148,9 @@ func processFile(filename string, fset *token.FileSet) error {
 
 	// Print declarations in order
 	for _, pos := range positions {
-		fmt.Println(declsByPos[pos])
+		for _, decl := range declsByPos[pos] {
+			fmt.Println(decl)
+		}
 	}
 
 	return nil
@@ -331,8 +334,6 @@ func formatValue(expr ast.Expr, maxLen int) string {
 					}
 					buf.WriteString(types.ExprString(elt))
 				}
-			} else {
-				buf.WriteString("timeout: 30, retries: true")
 			}
 			buf.WriteString("}")
 			return buf.String()
@@ -400,17 +401,10 @@ func inferType(expr ast.Expr) string {
 			return "bool"
 		}
 		if v.Name == "iota" {
-			return "Status"
+			return "iota"
 		}
 		return v.Name
 	case *ast.BinaryExpr:
-		if v.Op == token.MUL {
-			if sel, ok := v.X.(*ast.SelectorExpr); ok {
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "time" {
-					return "time.Duration"
-				}
-			}
-		}
 		return inferType(v.X)
 	case *ast.SelectorExpr:
 		if x, ok := v.X.(*ast.Ident); ok {
@@ -441,24 +435,14 @@ func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
 
 	switch decl.Tok {
 	case token.CONST, token.VAR:
-		var lastType ast.Expr
 		for _, spec := range decl.Specs {
 			if vs, ok := spec.(*ast.ValueSpec); ok {
-				// Get type from the ValueSpec if available
-				typeStr := ""
-				if vs.Type != nil {
-					typeStr = exprToString(vs.Type)
-					lastType = vs.Type
-				} else if lastType != nil {
-					typeStr = exprToString(lastType)
-				}
-
+				// Handle multiple names in a single spec
 				for i, name := range vs.Names {
 					if !includePrivate && !ast.IsExported(name.Name) {
 						continue
 					}
 
-					// Get relative path for output
 					relPath := filepath.Base(fset.Position(decl.Pos()).Filename)
 					if absPath, err := filepath.Abs(fset.Position(decl.Pos()).Filename); err == nil {
 						if rel, err := filepath.Rel(workDir, absPath); err == nil {
@@ -466,52 +450,31 @@ func processGenDecl(decl *ast.GenDecl, fset *token.FileSet) {
 						}
 					}
 
-					// Handle values
-					valueStr := ""
-					if i < len(vs.Values) && vs.Values[i] != nil && !skipValues {
-						// Special handling for map literals
-						if cl, ok := vs.Values[i].(*ast.CompositeLit); ok && isMapType(cl.Type) {
-							valueStr = formatMapLiteral(cl)
-						} else {
-							valueStr = exprToString(vs.Values[i])
-						}
-						if len(valueStr) > maxValueLength {
-							valueStr = valueStr[:maxValueLength] + "..."
-						}
-					}
-
-					// If type is not explicitly specified, try to infer it
-					if typeStr == "" && i < len(vs.Values) && vs.Values[i] != nil {
+					// Get type and value
+					typeStr := ""
+					if vs.Type != nil {
+						typeStr = exprToString(vs.Type)
+					} else if i < len(vs.Values) {
 						typeStr = inferType(vs.Values[i])
 					}
 
-					// For const declarations, preserve the original values
-					if decl.Tok == token.CONST {
-						if i < len(vs.Values) && vs.Values[i] != nil {
-							valueStr = exprToString(vs.Values[i])
-							if len(valueStr) > maxValueLength {
-								valueStr = valueStr[:maxValueLength] + "..."
+					valueStr := ""
+					if i < len(vs.Values) && !skipValues {
+						if mapLit, ok := vs.Values[i].(*ast.CompositeLit); ok && isMapType(mapLit.Type) {
+							valueStr = " = " + formatMapLiteral(mapLit)
+						} else {
+							val := formatValue(vs.Values[i], maxValueLength)
+							if val != "" {
+								valueStr = " = " + val
 							}
-						} else if i > 0 {
-							// For subsequent constants without values, use incremented value
-							prevValue := i
-							valueStr = fmt.Sprintf("%d", prevValue)
 						}
 					}
 
-					// Format the declaration
-					if valueStr != "" {
-						if typeStr != "" {
-							fmt.Printf("%s: var %s %s = %s\n", relPath, name.Name, typeStr, valueStr)
-						} else {
-							fmt.Printf("%s: var %s = %s\n", relPath, name.Name, valueStr)
-						}
+					// Format declaration
+					if typeStr != "" {
+						fmt.Printf("%s: var %s %s%s\n", relPath, name.Name, typeStr, valueStr)
 					} else {
-						if typeStr != "" {
-							fmt.Printf("%s: var %s %s\n", relPath, name.Name, typeStr)
-						} else {
-							fmt.Printf("%s: var %s\n", relPath, name.Name)
-						}
+						fmt.Printf("%s: var %s%s\n", relPath, name.Name, valueStr)
 					}
 				}
 			}
@@ -549,21 +512,26 @@ func isMapType(expr ast.Expr) bool {
 }
 
 // Helper function to format map literals correctly
-func formatMapLiteral(expr *ast.CompositeLit) string {
-	if m, ok := expr.Type.(*ast.MapType); ok {
-		keyType := exprToString(m.Key)
-		valueType := exprToString(m.Value)
-		elements := make([]string, 0, len(expr.Elts))
-		for _, elt := range expr.Elts {
+func formatMapLiteral(cl *ast.CompositeLit) string {
+	if m, ok := cl.Type.(*ast.MapType); ok {
+		keyType := types.ExprString(m.Key)
+		valueType := types.ExprString(m.Value)
+
+		// Build the map type string
+		mapTypeStr := fmt.Sprintf("map[%s]%s", keyType, valueType)
+
+		// Default case
+		elements := make([]string, 0, len(cl.Elts))
+		for _, elt := range cl.Elts {
 			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				key := exprToString(kv.Key)
-				value := exprToString(kv.Value)
+				key := types.ExprString(kv.Key)
+				value := types.ExprString(kv.Value)
 				elements = append(elements, fmt.Sprintf("%s: %s", key, value))
 			}
 		}
-		return fmt.Sprintf("map[%s]%s{%s}", keyType, valueType, strings.Join(elements, ", "))
+		return fmt.Sprintf("%s{%s}", mapTypeStr, strings.Join(elements, ", "))
 	}
-	return exprToString(expr)
+	return types.ExprString(cl)
 }
 
 // Add this new helper function
@@ -741,7 +709,9 @@ func formatType(expr ast.Expr) string {
 
 func formatValueSpec(spec *ast.ValueSpec, tok token.Token, maxLen int) []string {
 	var declarations []string
+	var lastValue ast.Expr
 
+	// Handle multiple names in a single spec
 	for i, name := range spec.Names {
 		var buf strings.Builder
 		buf.WriteString("var ")
@@ -753,41 +723,35 @@ func formatValueSpec(spec *ast.ValueSpec, tok token.Token, maxLen int) []string 
 			typeStr = types.ExprString(spec.Type)
 		} else if i < len(spec.Values) {
 			typeStr = inferType(spec.Values[i])
+			lastValue = spec.Values[i]
+		} else if lastValue != nil {
+			typeStr = inferType(lastValue)
 		}
 
-		// Handle special cases
-		if strings.HasPrefix(name.Name, "Status") {
-			typeStr = "Status"
-		} else if name.Name == "Monday" || name.Name == "Tuesday" || name.Name == "Sunday" {
-			typeStr = "Day"
-		}
-
-		// Handle time.Duration
-		if i < len(spec.Values) {
-			if call, ok := spec.Values[i].(*ast.BinaryExpr); ok {
-				if sel, ok := call.X.(*ast.SelectorExpr); ok {
-					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "time" {
-						typeStr = "time.Duration"
-					}
-				}
-			}
-		}
-
+		// Add type if present
 		if typeStr != "" {
 			buf.WriteString(" ")
 			buf.WriteString(typeStr)
 		}
 
-		// Add value if present
-		if i < len(spec.Values) {
+		// Add value if present and not skipping values
+		if i < len(spec.Values) && !skipValues {
 			buf.WriteString(" = ")
-			buf.WriteString(formatValue(spec.Values[i], maxLen))
+			if mapLit, ok := spec.Values[i].(*ast.CompositeLit); ok && isMapType(mapLit.Type) {
+				// For map literals, include the type in the value
+				mapType := types.ExprString(mapLit.Type)
+				buf.WriteString(mapType)
+				buf.WriteString(formatMapLiteral(mapLit))
+			} else {
+				buf.WriteString(formatValue(spec.Values[i], maxLen))
+			}
+			lastValue = spec.Values[i]
 		} else if tok == token.CONST {
 			// For constants without explicit values
-			if strings.HasPrefix(name.Name, "Status") || name.Name == "Sunday" || name.Name == "Monday" || name.Name == "Tuesday" {
-				buf.WriteString(" = iota")
-			} else {
-				buf.WriteString(fmt.Sprintf(" = %d", i+1))
+			if lastValue != nil {
+				// Use the last value for subsequent constants in a group
+				buf.WriteString(" = ")
+				buf.WriteString(formatValue(lastValue, maxLen))
 			}
 		}
 
