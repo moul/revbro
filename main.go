@@ -283,12 +283,21 @@ func formatFuncType(ft *ast.FuncType) string {
 		buf.WriteString(" ")
 		results := make([]string, 0, len(ft.Results.List))
 		for _, result := range ft.Results.List {
-			results = append(results, types.ExprString(result.Type))
+			typeStr := types.ExprString(result.Type)
+			// Remove parentheses from pointer types
+			if strings.HasPrefix(typeStr, "(*") {
+				typeStr = "*" + typeStr[2:len(typeStr)-1]
+			}
+			results = append(results, typeStr)
 		}
-		if len(results) > 1 || strings.HasPrefix(results[0], "*") {
+
+		// Only add parentheses for multiple results that aren't already parenthesized
+		if len(results) > 1 && !strings.HasPrefix(results[0], "(") {
+			buf.WriteString("(")
 			buf.WriteString(strings.Join(results, ", "))
+			buf.WriteString(")")
 		} else {
-			buf.WriteString(results[0])
+			buf.WriteString(strings.Join(results, ", "))
 		}
 	}
 
@@ -302,7 +311,7 @@ func formatValue(expr ast.Expr, maxLen int) string {
 		if v.Kind == token.STRING {
 			val := v.Value
 			if len(val) > maxLen {
-				return val[:maxLen-3] + " th..."
+				return val[:maxLen-3] + "..."
 			}
 			return val
 		}
@@ -639,7 +648,23 @@ func formatTypeSpec(spec *ast.TypeSpec) string {
 
 	switch t := spec.Type.(type) {
 	case *ast.StructType:
-		buf.WriteString("struct { }")
+		buf.WriteString("struct { ")
+		if t.Fields != nil {
+			fields := make([]string, 0, len(t.Fields.List))
+			for _, field := range t.Fields.List {
+				if len(field.Names) == 0 {
+					// Handle embedded types
+					fields = append(fields, types.ExprString(field.Type))
+				} else {
+					// Handle regular fields
+					fieldName := field.Names[0].Name
+					fieldType := types.ExprString(field.Type)
+					fields = append(fields, fmt.Sprintf("%s %s", fieldName, fieldType))
+				}
+			}
+			buf.WriteString(strings.Join(fields, "; "))
+		}
+		buf.WriteString(" }")
 
 	case *ast.InterfaceType:
 		buf.WriteString("interface { ")

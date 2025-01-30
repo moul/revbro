@@ -534,7 +534,7 @@ func TestProcessPath(t *testing.T) {
 			want: []string{
 				`vars.go: var private string = "hidden"`,
 				`vars.go: var Public string = "visible"`,
-				`vars.go: var Long string = "this is a very long string th...`,
+				`vars.go: var Long string = "this is a very long string...`,
 			},
 		},
 		{
